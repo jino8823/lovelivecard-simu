@@ -1,0 +1,1471 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TCG Simulator - Optimized with Stacked Cards</title>
+    <style>
+        :root { 
+            --card-w: 65px; --card-h: 90px; 
+            --bg-color: #0f172a; --panel-bg: #1e293b;
+            --accent: #3b82f6; --energy-accent: #eab308;
+            --danger: #ef4444;
+            --success-color: #22c55e;
+            --card-back: #334155;
+            --color-member: #ef4444; 
+            --color-live: #22c55e;   
+            --color-energy: #2563eb; 
+            --color-mia: #ec4899;
+        }
+        body { font-family: sans-serif; background: var(--bg-color); color: white; margin: 0; padding: 0; user-select: none; width: 100%; min-height: 100dvh; }
+
+        .screen { display: none; padding: 10px; height: calc(100dvh - 70px); overflow-y: auto; box-sizing: border-box; -webkit-overflow-scrolling: touch; }
+        .screen.active { display: block; }
+
+        .board { display: flex; flex-direction: column; gap: 8px; padding-bottom: 80px; }
+        .row-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+        .area { border: 2px solid #334155; border-radius: 8px; padding: 6px; background: var(--panel-bg); min-height: 105px; position: relative; }
+        .area.drag-highlight { border-color: var(--accent); background: #334155; }
+        .area-title { font-size: 10px; color: #94a3b8; margin-bottom: 4px; font-weight: bold; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; padding-bottom: 2px; }
+
+        .card-slot { display: flex; flex-wrap: wrap; gap: 8px; min-height: 90px; align-items: flex-start; }
+
+        /* 自由配置（検証）用のミニカード一覧グリッド (6列表示) */
+        .card-slot-mini { 
+            display: grid; 
+            grid-template-columns: repeat(6, 1fr); 
+            gap: 4px; 
+            padding: 4px; 
+            width: 100%; 
+            box-sizing: border-box; 
+        }
+
+        .area[data-zone="energyField"] .card-slot, .area[data-zone="sandbox-energyField"] .card-slot { 
+            display: block; position: relative; height: 100px; width: 100%;
+        }
+        .area[data-zone="energyField"] .card-container, .area[data-zone="sandbox-energyField"] .card-container { 
+            position: absolute; top: 0; transition: left 0.2s ease-out;
+        }
+
+        .area[data-zone="success"] .card-slot {
+            display: block; position: relative; height: 120px; width: 100%;
+        }
+        .area[data-zone="success"] .card-container {
+            position: absolute; left: 50%; transform: translateX(-50%); transition: top 0.2s ease-out;
+        }
+
+        .fixed-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; width: 100%; justify-items: center; }
+        .slot-frame { width: var(--card-w); height: var(--card-h); border: 2px dashed #334155; border-radius: 5px; position: relative; display: flex; align-items: center; justify-content: center; overflow: visible; }
+        .live-frame { width: var(--card-h); height: var(--card-w); }
+
+        /* ドロップゾーンハイライト用スタイリング */
+        .slot-frame.highlight-replace {
+            border-color: #3b82f6 !important;
+            background: rgba(59, 130, 246, 0.2);
+        }
+        .slot-frame.highlight-stack {
+            border-color: #22c55e !important;
+            background: rgba(34, 197, 94, 0.2);
+        }
+        /* ドロップ領域判定用のインジケータガイド */
+        .slot-frame.highlight-replace::after {
+            content: "置き換え";
+            position: absolute;
+            top: 2px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 9px;
+            background: #3b82f6;
+            color: white;
+            padding: 1px 4px;
+            border-radius: 3px;
+            z-index: 100;
+            pointer-events: none;
+        }
+        .slot-frame.highlight-stack::after {
+            content: "下に重ねる";
+            position: absolute;
+            bottom: 2px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 9px;
+            background: #22c55e;
+            color: white;
+            padding: 1px 4px;
+            border-radius: 3px;
+            z-index: 100;
+            pointer-events: none;
+        }
+
+        .card-container { position: relative; width: var(--card-w); height: var(--card-h); flex-shrink: 0; touch-action: none; display: flex; align-items: center; justify-content: center; }
+        .card {
+            width: var(--card-w); height: var(--card-h);
+            background: #1e293b; border-radius: 5px; border: 1px solid #000;
+            background-size: cover; background-repeat: no-repeat; background-position: center;
+            box-sizing: border-box; transition: transform 0.2s; z-index: 10;
+        }
+
+        .card.type-live { width: var(--card-h); height: var(--card-w); }
+        .card-container.has-live { width: var(--card-h); height: var(--card-w); }
+
+        /* 自由配置の一覧表示用の極小サイズ指定 (6列表示対応) */
+        .card-container-mini {
+            width: 100% !important;
+            aspect-ratio: 65/90;
+            height: auto !important;
+        }
+        .card-container-mini.has-live {
+            aspect-ratio: 90/65;
+        }
+        .card-container-mini .card {
+            width: 100% !important;
+            height: 100% !important;
+            font-size: 7px !important;
+        }
+
+        .area[data-zone="live"] .card.type-member, .area[data-zone="sandbox-live"] .card.type-member { transform: rotate(90deg); }
+
+        /* 付加カード（エネルギー：右に露出） */
+        .attached-energy { 
+            position: absolute; 
+            top: 0; 
+            opacity: 0.9; 
+            pointer-events: none; 
+            box-shadow: 2px 0 5px rgba(0,0,0,0.5);
+        }
+
+        /* 下に重ねられたメンバーカード（左に露出） */
+        .attached-under-member {
+            position: absolute;
+            top: 0;
+            opacity: 0.95;
+            pointer-events: none;
+            box-shadow: -2px 0 5px rgba(0,0,0,0.5);
+        }
+
+        .card.rest { transform: rotate(90deg) !important; }
+        .area[data-zone="live"] .card.type-member.rest, .area[data-zone="sandbox-live"] .card.type-member.rest { transform: rotate(180deg) !important; }
+
+        .card.dragging-active { 
+            position: fixed !important; 
+            z-index: 9999; 
+            pointer-events: none; 
+            opacity: 0.85; 
+            width: var(--card-w) !important;
+            height: var(--card-h) !important;
+            transform: scale(1.1) !important; 
+        }
+        .card.dragging-active.type-live {
+            width: var(--card-h) !important;
+            height: var(--card-w) !important;
+        }
+
+        .badge { position: absolute; top: -5px; right: -5px; background: var(--accent); width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; border: 1px solid white; z-index: 100; }
+        .badge-inline { display: inline-flex; background: #422006; border: 1px solid var(--energy-accent); padding: 1px 4px; border-radius: 4px; font-size: 10px; font-weight: bold; color: var(--energy-accent); margin-left: 4px; }
+
+        .live-popover { position: absolute; top: -45px; left: 50%; transform: translateX(-50%); background: #000; padding: 4px; border-radius: 4px; display: flex; gap: 4px; z-index: 1000; border: 1px solid #555; }
+
+        .nav { position: fixed; bottom: 0; left: 0; right: 0; background: #0f172a; display: flex; border-top: 1px solid #334155; height: 60px; z-index: 1000; }
+        .nav button { flex: 1; background: transparent; color: #64748b; border: none; font-size: 12px; cursor: pointer; font-weight: bold; }
+        .nav button.active { color: white; background: #1e293b; border-top: 3px solid var(--accent); }
+
+        .btn-mini { font-size: 9px; padding: 3px 5px; border-radius: 4px; border: none; background: #334155; color: white; cursor: pointer; white-space: nowrap; }
+        .btn-circle { width: 20px; height: 20px; border-radius: 50%; border: none; background: #334155; color: white; font-size: 14px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+        .btn-primary { background: var(--accent); color: white; border: none; padding: 12px; border-radius: 8px; width: 100%; font-weight: bold; cursor: pointer; }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-live { background: #db2777; color: white; font-size: 8px; padding: 2px 6px; }
+        .btn-undo { background: #64748b; color: white; }
+
+        .builder-section { margin-top: 15px; }
+        .section-title { font-size: 12px; font-weight: bold; padding: 4px 8px; border-radius: 4px; margin-bottom: 8px; display: inline-block; }
+        .deck-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
+        .builder-item { background: #1e293b; border-radius: 6px; border: 1px solid #334155; padding: 4px; display: flex; flex-direction: column; align-items: center; position: relative; }
+
+        .card-preview-builder { width: 100%; aspect-ratio: 65/90; border-radius: 4px; background-size: cover; background-repeat: no-repeat; background-position: center; margin-bottom: 4px; background-color: #0f172a; display: flex; align-items: center; justify-content: center; font-size: 8px; border: 1px solid #000; }
+        .card-preview-builder.type-live { aspect-ratio: 90/65; }
+
+        .builder-controls { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 2px; }
+        .builder-btn { background: #334155; border: none; color: white; border-radius: 4px; width: 22px; height: 22px; font-size: 14px; font-weight: bold; cursor: pointer; }
+        .builder-count { font-size: 12px; font-weight: bold; min-width: 14px; text-align: center; }
+
+        .card-item { display: flex; align-items: center; gap: 12px; background: #1e293b; padding: 10px; border-radius: 10px; margin-bottom: 8px; border: 1px solid #334155; }
+        .card-preview-sm { width: 45px; height: 62.3px; background: #334155; border-radius: 4px; background-size: cover; background-repeat: no-repeat; background-position: center; flex-shrink: 0; border: 1px solid #000; display: flex; align-items: center; justify-content: center; font-size: 8px; color: #94a3b8; }
+        .card-preview-sm.type-live { width: 62.3px; height: 45px; }
+
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 2000; padding: 20px; box-sizing: border-box; }
+        .modal-content { background: #1e293b; border-radius: 20px; padding: 20px; max-height: 80vh; overflow-y: auto; border: 1px solid #334155; }
+
+        #confirm-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 3000; justify-content: center; align-items: center; }
+        .confirm-box { background: #1e293b; padding: 20px; border-radius: 12px; border: 2px solid #334155; width: 80%; max-width: 300px; text-align: center; }
+        .confirm-btns { display: flex; gap: 10px; margin-top: 20px; }
+        .confirm-btns button { flex: 1; padding: 10px; border-radius: 6px; border: none; font-weight: bold; cursor: pointer; }
+
+        ::-webkit-scrollbar { display: none; }
+
+        #loading-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 4000; justify-content: center; align-items: center; color: white; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div id="loading-overlay">画像を最適化中...</div>
+
+<!-- プレイ用画面 -->
+<div id="screen-sim" class="screen active">
+    <div class="board">
+        <div class="area drop-target" data-zone="stack">
+            <div class="area-title">解決領域 
+                <div style="display:flex; gap:2px;">
+                    <button class="btn-mini btn-undo" onclick="undo()">1回戻る</button>
+                    <button class="btn-mini" style="background:var(--danger);" onclick="showResetConfirm()">リセット</button>
+                    <button class="btn-mini" onclick="moveAll('stack', 'main', false, false)">山札上</button>
+                    <button class="btn-mini" onclick="moveAll('stack', 'main', true, false)">山札下</button>
+                    <button class="btn-mini" onclick="moveAll('stack', 'main', true, true)">戻してシャッフル</button>
+                    <button class="btn-mini" style="background:var(--danger);" onclick="moveAll('stack', 'trash')">控え室へ</button>
+                </div>
+            </div>
+            <div id="stack-slot" class="card-slot"></div>
+        </div>
+
+        <div class="row-grid">
+            <div class="area" data-zone="main">
+                <div class="area-title">山札</div>
+                <div class="card-container" style="margin: 5px auto;"><div class="card" style="background:var(--card-back); display:flex; align-items:center; justify-content:center; border:2px solid #fff;"><span id="main-count" style="font-size:18px; font-weight:bold;">0</span></div></div>
+                <div style="display:flex; gap:2px; justify-content:center; margin-top:4px;">
+                    <button class="btn-mini" onclick="deckToTrash()">控え</button>
+                    <button class="btn-mini" onclick="deckToStack()">解決</button>
+                </div>
+            </div>
+            <div class="area drop-target" data-zone="success">
+                <div class="area-title">成功 <button class="btn-mini" onclick="showDetailModal('success')" style="font-size:7px;">詳細</button></div>
+                <div id="success-slot" class="card-slot"></div>
+            </div>
+            <div class="area drop-target" data-zone="trash">
+                <div class="area-title">
+                    控え 
+                    <div style="display:flex; gap:2px;">
+                        <button class="btn-mini" style="background:var(--color-mia); font-size:7px;" onclick="deckMiaEffect()">ミア</button>
+                        <button class="btn-mini" id="btn-refresh" style="background:var(--success-color); font-size:7px;">リフレッシュ</button>
+                    </div>
+                </div>
+                <div id="trash-slot" class="card-slot" style="justify-content:center; align-items:center;"></div>
+                <button class="btn-mini" style="width:100%; margin-top:4px;" onclick="showDetailModal('trash')">詳細</button>
+            </div>
+        </div>
+
+        <div class="area drop-target" data-zone="live">
+            <div class="area-title">
+                ライブエリア
+                <button class="btn-mini btn-live" onclick="startLive()">ライブ開始</button>
+            </div>
+            <div id="live-slot" class="fixed-grid">
+                <div class="slot-frame live-frame" data-index="0"></div>
+                <div class="slot-frame live-frame" data-index="1"></div>
+                <div class="slot-frame live-frame" data-index="2"></div>
+            </div>
+        </div>
+        <div class="area drop-target" data-zone="stage">
+            <div class="area-title">ステージ</div>
+            <div id="stage-slot" class="fixed-grid">
+                <div class="slot-frame" data-index="0"></div>
+                <div class="slot-frame" data-index="1"></div>
+                <div class="slot-frame" data-index="2"></div>
+            </div>
+        </div>
+
+        <div class="area drop-target" data-zone="hand">
+            <div class="area-title">手札 <button class="btn-mini" onclick="drawCard('main')">ドロー</button></div>
+            <div id="hand-slot" class="card-slot"></div>
+        </div>
+
+        <div class="area drop-target" data-zone="energyField">
+            <div class="area-title">
+                エネルギーエリア 
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <button class="btn-mini" style="background:var(--accent); font-size:10px;" onclick="untapAllEnergy()">回復</button>
+                    <button class="btn-circle" onclick="undoCharge()" style="background:var(--danger)">−</button>
+                    <button class="btn-circle" onclick="drawCard('energy')" style="background:var(--success-color)">＋</button>
+                    <span id="ene-count-badge" class="badge-inline">0</span>
+                </div>
+            </div>
+            <div id="energyField-slot" class="card-slot"></div>
+        </div>
+
+        <div class="area drop-target" data-zone="stack-mirror">
+            <div class="area-title">解決領域（手札用）
+                <div style="display:flex; gap:2px;">
+                    <button class="btn-mini" onclick="moveAll('stack', 'main', false, false)">山札上</button>
+                    <button class="btn-mini" onclick="moveAll('stack', 'main', true, false)">山札下</button>
+                    <button class="btn-mini" onclick="moveAll('stack', 'main', true, true)">戻してシャッフル</button>
+                    <button class="btn-mini" style="background:var(--danger);" onclick="moveAll('stack', 'trash')">控え室へ</button>
+                </div>
+            </div>
+            <div id="stack-mirror-slot" class="card-slot"></div>
+        </div>
+    </div>
+</div>
+
+<!-- 自由配置シミュレーション画面 (検証モード) -->
+<div id="screen-sandbox" class="screen">
+    <div class="board">
+        <div class="area drop-target" data-zone="sandbox-list-live" style="min-height: 80px; background: #0f172a; margin-bottom: 4px;">
+            <div class="area-title" style="color: var(--color-live);">
+                登録ライブカード一覧 (ここからライブエリアへ配置 / ドラッグして戻すと消去)
+            </div>
+            <div id="sandbox-list-live-content"></div>
+        </div>
+
+        <div class="area drop-target" data-zone="sandbox-live">
+            <div class="area-title">
+                ライブエリア (検証)
+                <button class="btn-mini btn-live" onclick="clearSandboxLive()">ライブ枠クリア (一覧へ)</button>
+            </div>
+            <div id="sandbox-live-slot" class="fixed-grid">
+                <div class="slot-frame live-frame" data-index="0"></div>
+                <div class="slot-frame live-frame" data-index="1"></div>
+                <div class="slot-frame live-frame" data-index="2"></div>
+            </div>
+        </div>
+
+        <div class="area drop-target" data-zone="sandbox-stage">
+            <div class="area-title">ステージ (検証)</div>
+            <div id="sandbox-stage-slot" class="fixed-grid">
+                <div class="slot-frame" data-index="0"></div>
+                <div class="slot-frame" data-index="1"></div>
+                <div class="slot-frame" data-index="2"></div>
+            </div>
+        </div>
+
+        <div class="area drop-target" data-zone="sandbox-energyField">
+            <div class="area-title">
+                エネルギーエリア (検証)
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <button class="btn-mini" style="background:var(--accent); font-size:10px;" onclick="untapAllSandboxEnergy()">回復</button>
+                    <button class="btn-circle" onclick="undoSandboxCharge()" style="background:var(--danger)">−</button>
+                    <button class="btn-circle" onclick="drawSandboxEnergy()" style="background:var(--success-color)">＋</button>
+                    <span id="sandbox-ene-count-badge" class="badge-inline">0</span>
+                </div>
+            </div>
+            <div id="sandbox-energyField-slot" class="card-slot"></div>
+        </div>
+
+        <div class="area drop-target" data-zone="sandbox-list-member" style="min-height: 120px; background: #0f172a;">
+            <div class="area-title" style="color: var(--color-member);">
+                登録メンバーカード一覧 (1列6枚表示 / ドラッグして戻すと消去)
+            </div>
+            <div id="sandbox-list-member-content"></div>
+        </div>
+    </div>
+</div>
+
+<div id="screen-deck" class="screen">
+    <div style="display:flex; justify-content: space-between; align-items:center; margin-bottom:10px;">
+        <div class="status-box"><span class="status-val" id="total-main">0 / 60</span><span style="font-size:10px; margin-left:4px;">メイン</span></div>
+        <div class="status-box"><span class="status-val" id="total-energy">0 / 12</span><span style="font-size:10px; margin-left:4px;">エネ</span></div>
+        <button class="btn-primary" style="width: auto; padding: 8px 16px;" onclick="startSimulation()">プレイ開始</button>
+    </div>
+    <div id="deck-builder-content"></div>
+</div>
+
+<div id="screen-base" class="screen">
+    <h3>カード登録</h3>
+    <div style="background:#1e293b; padding:15px; border-radius:12px;">
+        <input type="file" id="bulk-file" accept="image/*" multiple style="width:100%; margin-bottom:10px;">
+        <button id="upload-btn" class="btn-primary" onclick="handleBulkUpload()">画像を登録</button>
+        <button class="btn-secondary" style="background:#334155; color:white; border:none; padding:8px; border-radius:6px; width:100%; margin-top:8px;" onclick="generateSamples()">サンプルカードを生成</button>
+    </div>
+    <div id="base-list" style="margin-top:20px;"></div>
+</div>
+
+<div class="nav">
+    <button id="nav-sim" class="active" onclick="switchTab('sim')">プレイ</button>
+    <button id="nav-sandbox" onclick="switchTab('sandbox')">自由配置</button>
+    <button id="nav-deck" onclick="switchTab('deck')">構築</button>
+    <button id="nav-base" onclick="switchTab('base')">登録</button>
+</div>
+
+<div id="confirm-modal">
+    <div class="confirm-box">
+        <p style="font-size: 14px; font-weight: bold;">本当にリセットしますか？</p>
+        <p style="font-size: 11px; color: #94a3b8; margin-top: 8px;">盤面はクリアされ、山札がシャッフルされます。</p>
+        <div class="confirm-btns">
+            <button onclick="hideResetConfirm()" style="background: #334155; color: white;">キャンセル</button>
+            <button onclick="confirmReset()" style="background: var(--danger); color: white;">リセット</button>
+        </div>
+    </div>
+</div>
+
+<div id="detail-modal" class="modal" onclick="this.style.display='none'"><div class="modal-content" onclick="event.stopPropagation()"><h3 id="detail-modal-title">詳細</h3><div id="detail-list" style="display:flex; flex-wrap:wrap; gap:10px;"></div></div></div>
+
+<script>
+    const STORAGE_BASE = 'tcg_v1130_optimized_base';
+    const STORAGE_DECK = 'tcg_v1130_optimized_deck';
+
+    let cardBase = JSON.parse(localStorage.getItem(STORAGE_BASE)) || [];
+    let currentDeck = JSON.parse(localStorage.getItem(STORAGE_DECK)) || { main: {}, energy: {} };
+
+    // 通常プレイ用のステート
+    let simState = { 
+        main: [], energy: [], hand: [], 
+        stage: [null, null, null], 
+        live: [null, null, null], 
+        energyField: [], success: [], stack: [], trash: [] 
+    };
+
+    // 検証シミュレーション用のステート
+    let sandboxState = {
+        stage: [null, null, null],
+        live: [null, null, null],
+        energyField: [],
+        energyDeck: []
+    };
+
+    let historyStack = [];
+    let draggingCard = null;
+    let dragElement = null;
+    let activeLiveId = null;
+    let activeSandboxLiveId = null;
+
+    function shuffleArray(array) {
+        for (let i = array.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [array[i], array[j]] = [array[j], array[i]];
+        }
+        return array;
+    }
+
+    function saveState() {
+        historyStack.push(JSON.parse(JSON.stringify(simState)));
+        if (historyStack.length > 50) historyStack.shift();
+    }
+
+    function undo() {
+        if (historyStack.length === 0) return;
+        simState = historyStack.pop();
+        renderSim();
+    }
+
+    function save() { 
+        try {
+            localStorage.setItem(STORAGE_BASE, JSON.stringify(cardBase)); 
+            localStorage.setItem(STORAGE_DECK, JSON.stringify(currentDeck));
+        } catch (e) {
+            console.error('Storage error:', e);
+            alert('保存容量を超えました。登録画像を減らすか、より小さな画像を登録してください。');
+        }
+    }
+
+    function switchTab(tab) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+        document.getElementById('screen-' + tab).classList.add('active');
+        document.getElementById('nav-' + tab).classList.add('active');
+        if(tab === 'deck') renderDeckBuilder();
+        if(tab === 'base') renderCardBase();
+        if(tab === 'sandbox') {
+            initSandboxEnergyDeck();
+            renderSandbox();
+        }
+    }
+
+    function generateSamples() {
+        const samples = [
+            { id: 's1', name: 'Member A', type: 'member', color: '#ef4444' },
+            { id: 's2', name: 'Member B', type: 'member', color: '#3b82f6' },
+            { id: 's3', name: 'Live X', type: 'live', color: '#22c55e' },
+            { id: 's4', name: 'Energy', type: 'energy', color: '#eab308' }
+        ];
+        samples.forEach(s => { if(!cardBase.find(c => c.id === s.id)) cardBase.push({...s, isSample: true}); });
+        save(); renderCardBase();
+    }
+
+    async function compressImage(base64Str, maxWidth = 800, quality = 0.7) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.src = base64Str;
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                let width = img.width;
+                let height = img.height;
+
+                if (width > height) {
+                    if (width > maxWidth) {
+                        height = Math.round((height * maxWidth) / width);
+                        width = maxWidth;
+                    }
+                } else {
+                    if (height > maxWidth) {
+                        width = Math.round((width * maxWidth) / height);
+                        height = maxWidth;
+                    }
+                }
+
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                resolve(canvas.toDataURL('image/jpeg', quality));
+            };
+        });
+    }
+
+    async function handleBulkUpload() {
+        const input = document.getElementById('bulk-file');
+        const uploadBtn = document.getElementById('upload-btn');
+        const loading = document.getElementById('loading-overlay');
+
+        if (!input.files.length) return;
+
+        uploadBtn.disabled = true;
+        loading.style.display = 'flex';
+
+        for (const file of input.files) {
+            const rawBase64 = await new Promise(r => {
+                const reader = new FileReader();
+                reader.onload = e => r(e.target.result);
+                reader.readAsDataURL(file);
+            });
+
+            const optimizedBase64 = await compressImage(rawBase64);
+
+            const type = await new Promise(r => {
+                const img = new Image();
+                img.onload = () => r(img.width > img.height ? 'live' : 'member');
+                img.src = optimizedBase64;
+            });
+
+            cardBase.unshift({ id: 'c_' + Date.now() + Math.random(), img: optimizedBase64, type: type });
+        }
+
+        save(); 
+        renderCardBase(); 
+        input.value = '';
+        uploadBtn.disabled = false;
+        loading.style.display = 'none';
+    }
+
+    function renderCardBase() {
+        const list = document.getElementById('base-list'); list.innerHTML = '';
+        cardBase.forEach((c, idx) => {
+            const el = document.createElement('div'); el.className = 'card-item';
+            const bg = c.img ? `background-image:url(${c.img})` : `background:${c.color}`;
+            const liveClass = c.type === 'live' ? 'type-live' : '';
+            el.innerHTML = `
+                <div class="card-preview-sm ${liveClass}" style="${bg}">${c.isSample ? c.name : ''}</div>
+                <div style="flex:1">
+                    <select onchange="updateCardType(${idx}, this.value)" style="background:#0f172a;color:white;padding:6px;width:100%;">
+                        <option value="member" ${c.type==='member'?'selected':''}>メンバー</option>
+                        <option value="live" ${c.type==='live'?'selected':''}>ライブ</option>
+                        <option value="energy" ${c.type==='energy'?'selected':''}>エネルギー</option>
+                    </select>
+                </div>
+                <button class="btn-mini" style="background:var(--danger)" onclick="deleteCard(${idx})">削除</button>
+            `;
+            list.appendChild(el);
+        });
+    }
+
+    function updateCardType(idx, val) { cardBase[idx].type = val; save(); renderCardBase(); }
+    function deleteCard(idx) { cardBase.splice(idx, 1); save(); renderCardBase(); }
+
+    function renderDeckBuilder() {
+        const root = document.getElementById('deck-builder-content'); root.innerHTML = '';
+        updateDeckUI();
+        const types = [
+            { label: 'メンバー', value: 'member', color: 'var(--color-member)' },
+            { label: 'ライブ', value: 'live', color: 'var(--color-live)' },
+            { label: 'エネルギー', value: 'energy', color: 'var(--color-energy)' }
+        ];
+        types.forEach(t => {
+            const cards = cardBase.filter(c => c.type === t.value);
+            if(cards.length === 0) return;
+            const section = document.createElement('div'); section.className = 'builder-section';
+            section.innerHTML = `<div class="section-title" style="background:${t.color}22; color:${t.color}; border: 1px solid ${t.color}">${t.label}</div>`;
+            const grid = document.createElement('div'); grid.className = 'deck-grid';
+            cards.forEach(c => {
+                const pool = c.type === 'energy' ? 'energy' : 'main';
+                const count = currentDeck[pool][c.id] || 0;
+                const item = document.createElement('div'); item.className = 'builder-item';
+                const bg = c.img ? `background-image:url(${c.img})` : `background:${c.color}`;
+                const liveClass = c.type === 'live' ? 'type-live' : '';
+                item.innerHTML = `
+                    <div class="card-preview-builder ${liveClass}" style="${bg}">${c.isSample ? c.name : ''}</div>
+                    <div class="builder-controls">
+                        <button onclick="modifyDeck('${c.id}','${pool}',-1)" class="builder-btn">-</button>
+                        <span class="builder-count" id="ui-cnt-${c.id}">${count}</span>
+                        <button onclick="modifyDeck('${c.id}','${pool}',1)" class="builder-btn">+</button>
+                    </div>
+                `;
+                grid.appendChild(item);
+            });
+            section.appendChild(grid);
+            root.appendChild(section);
+        });
+    }
+
+    function modifyDeck(id, pool, val) {
+        if(!currentDeck[pool][id]) currentDeck[pool][id] = 0;
+        currentDeck[pool][id] = Math.max(0, currentDeck[pool][id] + val);
+        save();
+        const el = document.getElementById('ui-cnt-' + id);
+        if(el) el.innerText = currentDeck[pool][id];
+        updateDeckUI();
+    }
+
+    function updateDeckUI() {
+        let tm=0, te=0;
+        cardBase.forEach(c => { if(c.type === 'energy') te += (currentDeck.energy[c.id] || 0); else tm += (currentDeck.main[c.id] || 0); });
+        document.getElementById('total-main').innerText = `${tm} / 60`;
+        document.getElementById('total-energy').innerText = `${te} / 12`;
+    }
+
+    function showResetConfirm() { document.getElementById('confirm-modal').style.display = 'flex'; }
+    function hideResetConfirm() { document.getElementById('confirm-modal').style.display = 'none'; }
+    function confirmReset() { hideResetConfirm(); startSimulation(); }
+
+    function startSimulation() {
+        historyStack = [];
+        simState = { 
+            main: [], energy: [], hand: [], 
+            stage: [null, null, null], 
+            live: [null, null, null], 
+            energyField: [], success: [], stack: [], trash: [] 
+        };
+        cardBase.forEach(c => {
+            const p = c.type === 'energy' ? 'energy' : 'main';
+            const n = currentDeck[p][c.id] || 0;
+            for(let i=0; i<n; i++) simState[p].push({...c, instId: `${p}_${c.id}_${i}`, rest: false, attached: [], underMembers: []});
+        });
+        shuffleArray(simState.main);
+        shuffleArray(simState.energy);
+        renderSim();
+        switchTab('sim');
+    }
+
+    function renderSim() {
+        const simpleZones = ['hand', 'stack', 'stack-mirror'];
+        simpleZones.forEach(z => {
+            const slot = document.getElementById(z + '-slot'); slot.innerHTML = '';
+            const dataZone = z === 'stack-mirror' ? 'stack' : z;
+            simState[dataZone].forEach(c => slot.appendChild(createGameCard(c, z)));
+        });
+
+        const efSlot = document.getElementById('energyField-slot'); efSlot.innerHTML = '';
+        const efStep = calculateStep(simState.energyField.length, efSlot.clientWidth || window.innerWidth - 40);
+        simState.energyField.forEach((c, i) => {
+            const el = createGameCard(c, 'energyField');
+            el.style.left = (i * efStep) + 'px';
+            el.style.zIndex = 10 + i;
+            efSlot.appendChild(el);
+        });
+
+        const sucSlot = document.getElementById('success-slot'); sucSlot.innerHTML = '';
+        simState.success.forEach((c, i) => {
+            const el = createGameCard(c, 'success');
+            el.style.top = (i * 20) + 'px';
+            el.style.zIndex = 10 + i;
+            sucSlot.appendChild(el);
+        });
+
+        const fixedZones = ['stage', 'live'];
+        fixedZones.forEach(z => {
+            const slotRoot = document.getElementById(z + '-slot');
+            const frames = slotRoot.querySelectorAll('.slot-frame');
+            frames.forEach((frame, idx) => {
+                frame.innerHTML = '';
+                const card = simState[z][idx];
+                if(card) frame.appendChild(createGameCard(card, z));
+            });
+        });
+
+        const trSlot = document.getElementById('trash-slot'); trSlot.innerHTML = '';
+        if(simState.trash.length) {
+            const last = simState.trash[simState.trash.length-1];
+            const ui = createGameCard(last, 'trash');
+            const badge = document.createElement('div'); badge.className = 'badge'; badge.innerText = simState.trash.length;
+            ui.querySelector('.card').appendChild(badge); trSlot.appendChild(ui);
+        }
+
+        document.getElementById('main-count').innerText = simState.main.length;
+        document.getElementById('ene-count-badge').innerText = simState.energy.length;
+    }
+
+    function calculateStep(count, width) {
+        const cardWidth = 65;
+        const padding = 10;
+        let step = cardWidth + 8;
+        if (count > 1 && (count * step) > width) step = (width - cardWidth - padding) / (count - 1);
+        return step;
+    }
+
+    function createGameCard(c, zoneName) {
+        if(!c) return document.createElement('div');
+        const cont = document.createElement('div'); 
+        cont.className = 'card-container' + (c.type === 'live' ? ' has-live' : '');
+        cont.dataset.instId = c.instId;
+
+        const card = document.createElement('div'); 
+        card.className = `card type-${c.type} ${c.rest ? 'rest' : ''}`;
+
+        if(c.img) {
+            card.style.backgroundImage = `url(${c.img})`;
+            card.style.backgroundColor = '#0f172a';
+        } else { 
+            card.style.background = c.color; 
+            card.style.display = 'flex'; 
+            card.style.alignItems = 'center'; 
+            card.style.justifyContent = 'center'; 
+            card.style.fontSize = '9px'; 
+            card.innerText = c.name; 
+        }
+
+        // --- 下に重ねられたメンバーカードの表示（左側に露出＆新しいものが一番上） ---
+        if(c.underMembers && c.underMembers.length > 0) {
+            c.underMembers.forEach((uCard, i) => {
+                const uUi = document.createElement('div');
+                uUi.className = `card attached-under-member type-member`;
+                // 配列の最後（最新）ほど大きいz-index、かつ左にズレる
+                uUi.style.left = (-12 - (i * 10)) + 'px'; 
+                uUi.style.zIndex = (4 + i);
+                if(uCard.img) uUi.style.backgroundImage = `url(${uCard.img})`;
+                else uUi.style.background = uCard.color;
+                cont.appendChild(uUi);
+            });
+        }
+
+        // --- 付与エネルギーの表示（右側に露出＆新しいものが一番上） ---
+        if(c.attached && c.attached.length > 0) {
+            c.attached.forEach((eCard, i) => {
+                const eUi = document.createElement('div');
+                eUi.className = `card attached-energy type-energy`;
+                // 配列の最後（最新）ほど大きいz-index、かつ右にズレる
+                eUi.style.right = (-12 - (i * 10)) + 'px';
+                eUi.style.zIndex = (5 + i);
+                if(eCard.img) eUi.style.backgroundImage = `url(${eCard.img})`;
+                else eUi.style.background = eCard.color;
+                cont.appendChild(eUi);
+            });
+        }
+
+        if(zoneName === 'live' && activeLiveId === c.instId) {
+            const popover = document.createElement('div');
+            popover.className = 'live-popover';
+            const btnSucc = document.createElement('button'); btnSucc.className = 'btn-mini'; btnSucc.innerText = '成功へ';
+            btnSucc.onclick = (e) => { e.stopPropagation(); moveSpecificCard(c, 'live', 'success'); };
+            const btnTrash = document.createElement('button'); btnTrash.className = 'btn-mini'; btnTrash.innerText = '控えへ';
+            btnTrash.onclick = (e) => { e.stopPropagation(); moveSpecificCard(c, 'live', 'trash'); };
+            popover.appendChild(btnSucc);
+            popover.appendChild(btnTrash);
+            cont.appendChild(popover);
+        }
+
+        let timer;
+        card.onpointerdown = (e) => {
+            timer = setTimeout(() => {
+                const effectiveZone = (zoneName === 'stack-mirror') ? 'stack' : zoneName;
+                draggingCard = { ...c, fromZone: effectiveZone };
+                dragElement = card.cloneNode(true); 
+                dragElement.classList.add('dragging-active');
+                document.body.appendChild(dragElement);
+                updateDrag(e.clientX, e.clientY);
+                document.getElementById('detail-modal').style.display = 'none';
+                activeLiveId = null;
+            }, 150);
+        };
+        card.onpointerup = () => clearTimeout(timer);
+
+        card.onclick = (e) => { 
+            if(!draggingCard) {
+                if(zoneName === 'live') {
+                    activeLiveId = (activeLiveId === c.instId) ? null : c.instId;
+                    renderSim();
+                } else if (zoneName !== 'success') {
+                    saveState();
+                    c.rest = !c.rest; renderSim(); 
+                }
+            } 
+        };
+        cont.appendChild(card); 
+        return cont;
+    }
+
+    function moveSpecificCard(c, fromZone, toZone) {
+        saveState();
+        if(Array.isArray(simState[fromZone])) {
+            const idx = simState[fromZone].findIndex(x => x && x.instId === c.instId);
+            if(idx !== -1) {
+                const card = simState[fromZone][idx];
+                clearCardSubAttachments(card);
+                if(fromZone === 'stage' || fromZone === 'live') simState[fromZone][idx] = null;
+                else simState[fromZone].splice(idx, 1);
+                card.rest = false;
+                simState[toZone].push(card);
+                activeLiveId = null;
+                renderSim();
+            }
+        }
+    }
+
+    // メンバーカードの付与エネルギーや下に重ねられたカードのクリーンアップ処理
+    function clearCardSubAttachments(card) {
+        if (!card) return;
+        if (card.attached && card.attached.length > 0) {
+            card.attached.forEach(eCard => { eCard.rest = false; simState.energy.push(eCard); });
+            card.attached = [];
+        }
+        if (card.underMembers && card.underMembers.length > 0) {
+            card.underMembers.forEach(uCard => { uCard.rest = false; simState.trash.push(uCard); });
+            card.underMembers = [];
+        }
+    }
+
+    function updateDrag(x, y) { if(dragElement) { dragElement.style.left = (x-32)+'px'; dragElement.style.top = (y-45)+'px'; } }
+
+    window.onpointermove = (e) => {
+        if(!draggingCard) return; updateDrag(e.clientX, e.clientY);
+
+        // 全ハイライト要素の初期化
+        document.querySelectorAll('.drop-target').forEach(area => area.classList.remove('drag-highlight'));
+        document.querySelectorAll('.slot-frame').forEach(frame => {
+            frame.classList.remove('highlight-replace', 'highlight-stack');
+        });
+
+        const targets = document.elementsFromPoint(e.clientX, e.clientY);
+        const areaEl = targets.find(el => el.classList.contains('drop-target'));
+        const frameEl = targets.find(el => el.classList.contains('slot-frame'));
+
+        if(areaEl) areaEl.classList.add('drag-highlight');
+
+        // ステージ上の枠にドラッグした際のアプローチ1（上下判定）リアルタイムフィードバック
+        if(frameEl && (frameEl.closest('[data-zone="stage"]') || frameEl.closest('[data-zone="sandbox-stage"]'))) {
+            const rect = frameEl.getBoundingClientRect();
+            const relY = e.clientY - rect.top;
+            const slotIdx = parseInt(frameEl.dataset.index);
+            const isSandbox = !!frameEl.closest('[data-zone="sandbox-stage"]');
+            const hostCard = isSandbox ? sandboxState.stage[slotIdx] : simState.stage[slotIdx];
+
+            if (hostCard && draggingCard.type === 'member') {
+                if (relY < rect.height * 0.5) {
+                    frameEl.classList.add('highlight-replace');
+                } else {
+                    frameEl.classList.add('highlight-stack');
+                }
+            } else if (hostCard && draggingCard.type === 'energy') {
+                frameEl.classList.add('highlight-stack');
+            }
+        }
+    };
+
+    window.onpointerup = (e) => {
+        if(!draggingCard) return;
+        let targetZone = null;
+        let targetSlotIdx = -1;
+        let isStackingAction = false;
+
+        const targets = document.elementsFromPoint(e.clientX, e.clientY);
+        const areaEl = targets.find(el => el.classList.contains('drop-target'));
+        const frameEl = targets.find(el => el.classList.contains('slot-frame'));
+
+        if(areaEl) targetZone = areaEl.dataset.zone;
+        if(frameEl) {
+            targetSlotIdx = parseInt(frameEl.dataset.index);
+            const rect = frameEl.getBoundingClientRect();
+            const relY = e.clientY - rect.top;
+            if (relY >= rect.height * 0.5) {
+                isStackingAction = true;
+            }
+        }
+
+        // --- Sandbox (検証用) ドラッグ&ドロップの制御分岐 ---
+        if (draggingCard.fromZone.startsWith('sandbox-') || (targetZone && targetZone.startsWith('sandbox-'))) {
+            handleSandboxDrop(targetZone, targetSlotIdx, isStackingAction, targets);
+            finishDrag();
+            return;
+        }
+        // --------------------------------------------------
+
+        if (targetZone === 'stack-mirror') targetZone = 'stack';
+
+        let isValidMove = false;
+        if (targetZone) {
+            if (draggingCard.type === 'energy') {
+                const restrictedForEnergy = ['stack', 'main', 'success', 'trash', 'live', 'hand'];
+                if (targetZone === 'stage') {
+                    const host = simState.stage[targetSlotIdx];
+                    if (host) isValidMove = true;
+                } else if (!restrictedForEnergy.includes(targetZone) || targetZone === 'energyField') {
+                    isValidMove = true;
+                }
+            } else {
+                if (targetZone === 'success') {
+                    if (draggingCard.type === 'live') isValidMove = true;
+                } else if ((targetZone === 'stage' || targetZone === 'live')) {
+                    if (targetSlotIdx !== -1) isValidMove = true;
+                } else {
+                    isValidMove = true;
+                }
+            }
+        }
+
+        if (isValidMove) {
+            saveState();
+            performMove(draggingCard, targetZone, targetSlotIdx, isStackingAction);
+        } else renderSim();
+        finishDrag();
+    };
+
+    function performMove(c, targetZone, slotIdx, isStackingAction = false) {
+        let movingCard = null;
+        const from = draggingCard.fromZone;
+        let originalSlotIdx = -1;
+
+        if(from === 'stage' || from === 'live') {
+            originalSlotIdx = simState[from].findIndex(x => x && x.instId === c.instId);
+            if(originalSlotIdx !== -1) { movingCard = simState[from][originalSlotIdx]; simState[from][originalSlotIdx] = null; }
+        } else {
+            const idx = simState[from].findIndex(x => x && x.instId === c.instId);
+            if(idx !== -1) movingCard = simState[from].splice(idx, 1)[0];
+        }
+
+        if(!movingCard) return;
+        movingCard.rest = false;
+
+        if (targetZone === 'stage' && slotIdx !== -1) {
+            const existing = simState.stage[slotIdx];
+            if (existing) {
+                if (movingCard.type === 'energy' || (movingCard.type === 'member' && isStackingAction)) {
+                    if (movingCard.type === 'energy') {
+                        if (!existing.attached) existing.attached = [];
+                        existing.attached.push(movingCard); // 末尾に追加して最新を一番上にする
+                    } else {
+                        if (!existing.underMembers) existing.underMembers = [];
+                        clearCardSubAttachments(movingCard);
+                        existing.underMembers.push(movingCard); // 末尾に追加して最新を一番上にする
+                    }
+                } else {
+                    if (from === targetZone && originalSlotIdx !== -1) {
+                        simState[from][originalSlotIdx] = existing;
+                        simState[targetZone][slotIdx] = movingCard;
+                    } else {
+                        clearCardSubAttachments(existing);
+                        existing.rest = false; 
+                        simState.trash.push(existing); 
+                        simState[targetZone][slotIdx] = movingCard;
+                    }
+                }
+            } else {
+                simState[targetZone][slotIdx] = movingCard;
+            }
+        } else if (targetZone === 'live' && slotIdx !== -1) {
+            const existing = simState.live[slotIdx];
+            if (existing) {
+                if (from === targetZone && originalSlotIdx !== -1) {
+                    simState[from][originalSlotIdx] = existing;
+                    simState[targetZone][slotIdx] = movingCard;
+                } else {
+                    clearCardSubAttachments(existing);
+                    existing.rest = false; 
+                    simState[targetZone][slotIdx] = movingCard;
+                }
+            } else {
+                simState[targetZone][slotIdx] = movingCard;
+            }
+        } else {
+            clearCardSubAttachments(movingCard);
+            if(Array.isArray(simState[targetZone])) simState[targetZone].push(movingCard);
+        }
+        renderSim();
+    }
+
+    function finishDrag() {
+        if(dragElement) dragElement.remove();
+        draggingCard = null; dragElement = null;
+        document.querySelectorAll('.drop-target').forEach(a => a.classList.remove('drag-highlight'));
+        document.querySelectorAll('.slot-frame').forEach(frame => {
+            frame.classList.remove('highlight-replace', 'highlight-stack');
+        });
+    }
+
+    function drawCard(p) {
+        if(simState[p].length) {
+            saveState();
+            const c = simState[p].pop();
+            if(p === 'energy') simState.energyField.push(c); else simState.hand.push(c);
+            renderSim();
+        }
+    }
+
+    function undoCharge() {
+        if(simState.energyField.length) {
+            saveState();
+            const c = simState.energyField.pop();
+            c.rest = false;
+            simState.energy.unshift(c);
+            renderSim();
+        }
+    }
+
+    function untapAllEnergy() {
+        const hasTappedEnergy = simState.energyField.some(c => c && c.rest);
+        if (hasTappedEnergy) {
+            saveState();
+            simState.energyField.forEach(c => {
+                if (c && c.rest) {
+                    c.rest = false;
+                }
+            });
+            renderSim();
+        }
+    }
+
+    function startLive() {
+        saveState();
+        simState.live.forEach((card, idx) => {
+            if (card && card.type === 'member') {
+                card.rest = false;
+                clearCardSubAttachments(card);
+                simState.trash.push(card);
+                simState.live[idx] = null;
+            }
+        });
+        activeLiveId = null;
+        renderSim();
+    }
+
+    function deckMiaEffect() {
+        if (simState.trash.length === 0) return;
+
+        const memberCards = simState.trash.filter(c => c.type === 'member');
+        if (memberCards.length === 0) return;
+
+        saveState();
+
+        simState.trash = simState.trash.filter(c => c.type !== 'member');
+
+        memberCards.forEach(c => {
+            clearCardSubAttachments(c);
+            c.rest = false;
+        });
+
+        shuffleArray(memberCards);
+        simState.main = [...memberCards, ...simState.main];
+
+        renderSim();
+    }
+
+    function deckToTrash() { if(simState.main.length) { saveState(); simState.trash.push(simState.main.pop()); renderSim(); } }
+    function deckToStack() { if(simState.main.length) { saveState(); simState.stack.push(simState.main.pop()); renderSim(); } }
+
+    function moveAll(fromZone, toZone, toBottom = false, shuffle = false) {
+        saveState();
+        let cards = [];
+        if(fromZone === 'stage' || fromZone === 'live') {
+            cards = simState[fromZone].filter(x => x !== null);
+            simState[fromZone] = [null, null, null];
+        } else { cards = [...simState[fromZone]]; simState[fromZone] = []; }
+
+        cards.forEach(c => {
+            clearCardSubAttachments(c);
+            c.rest = false;
+        });
+
+        if(toZone === 'trash') {
+            cards = cards.filter(c => { if(c.type === 'energy') { simState.energy.push(c); return false; } return true; });
+        }
+
+        if(toZone === 'main') {
+            if(shuffle) { simState.main = [...simState.main, ...cards]; shuffleArray(simState.main); }
+            else {
+                if(toBottom) simState.main = [...cards.reverse(), ...simState.main];
+                else simState.main = [...simState.main, ...cards];
+            }
+        } else { 
+            if(Array.isArray(simState[toZone])) simState[toZone] = [...simState[toZone], ...cards]; 
+        }
+        renderSim();
+    }
+
+    function showDetailModal(zone) {
+        const list = document.getElementById('detail-list'); list.innerHTML = '';
+        const title = document.getElementById('detail-modal-title');
+        title.innerText = zone === 'trash' ? '控え室詳細' : '成功エリア詳細';
+        [...simState[zone]].reverse().forEach(c => {
+            const cont = createGameCard(c, zone);
+            cont.style.position = 'relative';
+            cont.style.top = '0';
+            cont.style.left = '0';
+            cont.style.transform = 'none';
+            list.appendChild(cont);
+        });
+        document.getElementById('detail-modal').style.display = 'block';
+    }
+
+    // =========================================================================
+    // Sandbox (自由配置シミュレーション) 専用の関数群
+    // =========================================================================
+
+    function initSandboxEnergyDeck() {
+        sandboxState.energyDeck = [];
+        const energyCards = cardBase.filter(c => c.type === 'energy');
+
+        let hasConfig = false;
+        energyCards.forEach(c => {
+            const count = currentDeck.energy[c.id] || 0;
+            if (count > 0) {
+                hasConfig = true;
+                for (let i = 0; i < count; i++) {
+                    sandboxState.energyDeck.push({
+                        ...c,
+                        instId: `sandbox_energy_${c.id}_${i}`,
+                        rest: false,
+                        attached: [],
+                        underMembers: []
+                    });
+                }
+            }
+        });
+
+        if (!hasConfig && energyCards.length > 0) {
+            energyCards.forEach(c => {
+                for (let i = 0; i < 5; i++) {
+                    sandboxState.energyDeck.push({
+                        ...c,
+                        instId: `sandbox_energy_${c.id}_${i}`,
+                        rest: false,
+                        attached: [],
+                        underMembers: []
+                    });
+                }
+            });
+        }
+        shuffleArray(sandboxState.energyDeck);
+    }
+
+    function drawSandboxEnergy() {
+        if (sandboxState.energyDeck.length > 0) {
+            const c = sandboxState.energyDeck.pop();
+            sandboxState.energyField.push(c);
+            renderSandbox();
+        } else {
+            const energyCards = cardBase.filter(c => c.type === 'energy');
+            if (energyCards.length > 0) {
+                const randomBase = energyCards[Math.floor(Math.random() * energyCards.length)];
+                const c = {
+                    ...randomBase,
+                    instId: `sandbox_energy_generated_${Date.now()}`,
+                    rest: false,
+                    attached: [],
+                    underMembers: []
+                };
+                sandboxState.energyField.push(c);
+                renderSandbox();
+            }
+        }
+    }
+
+    function undoSandboxCharge() {
+        if (sandboxState.energyField.length > 0) {
+            const c = sandboxState.energyField.pop();
+            c.rest = false;
+            sandboxState.energyDeck.unshift(c);
+            renderSandbox();
+        }
+    }
+
+    function renderSandbox() {
+        const liveSlot = document.getElementById('sandbox-live-slot');
+        const liveFrames = liveSlot.querySelectorAll('.slot-frame');
+        liveFrames.forEach((frame, idx) => {
+            frame.innerHTML = '';
+            const card = sandboxState.live[idx];
+            if(card) frame.appendChild(createSandboxGameCard(card, 'sandbox-live'));
+        });
+
+        const stageSlot = document.getElementById('sandbox-stage-slot');
+        const stageFrames = stageSlot.querySelectorAll('.slot-frame');
+        stageFrames.forEach((frame, idx) => {
+            frame.innerHTML = '';
+            const card = sandboxState.stage[idx];
+            if(card) frame.appendChild(createSandboxGameCard(card, 'sandbox-stage'));
+        });
+
+        const efSlot = document.getElementById('sandbox-energyField-slot'); efSlot.innerHTML = '';
+        const efStep = calculateStep(sandboxState.energyField.length, efSlot.clientWidth || window.innerWidth - 40);
+        sandboxState.energyField.forEach((c, i) => {
+            const el = createSandboxGameCard(c, 'sandbox-energyField');
+            el.style.left = (i * efStep) + 'px';
+            el.style.zIndex = 10 + i;
+            efSlot.appendChild(el);
+        });
+
+        document.getElementById('sandbox-ene-count-badge').innerText = sandboxState.energyDeck.length;
+
+        const listLiveContent = document.getElementById('sandbox-list-live-content');
+        listLiveContent.innerHTML = '';
+        const liveCards = cardBase.filter(c => c.type === 'live');
+        if (liveCards.length > 0) {
+            const slotGrid = document.createElement('div');
+            slotGrid.className = 'card-slot-mini';
+            liveCards.forEach(c => {
+                const el = createSandboxGameCard(c, 'sandbox-list-live', true);
+                slotGrid.appendChild(el);
+            });
+            listLiveContent.appendChild(slotGrid);
+        } else {
+            listLiveContent.innerHTML = `<div style="font-size:10px; color:#64748b; padding:10px;">登録されているライブカードがありません。「登録」タブで登録してください。</div>`;
+        }
+
+        const listMemberContent = document.getElementById('sandbox-list-member-content');
+        listMemberContent.innerHTML = '';
+        const memberCards = cardBase.filter(c => c.type === 'member');
+        if (memberCards.length > 0) {
+            const slotGrid = document.createElement('div');
+            slotGrid.className = 'card-slot-mini';
+            memberCards.forEach(c => {
+                const el = createSandboxGameCard(c, 'sandbox-list-member', true);
+                slotGrid.appendChild(el);
+            });
+            listMemberContent.appendChild(slotGrid);
+        } else {
+            listMemberContent.innerHTML = `<div style="font-size:10px; color:#64748b; padding:10px;">登録されているメンバーカードがありません。「登録」タブで登録してください。</div>`;
+        }
+    }
+
+    function createSandboxGameCard(c, zoneName, isMini = false) {
+        if(!c) return document.createElement('div');
+        const cont = document.createElement('div'); 
+
+        let miniClass = isMini ? ' card-container-mini' : '';
+        cont.className = 'card-container' + (c.type === 'live' ? ' has-live' : '') + miniClass;
+        cont.dataset.instId = c.instId || c.id;
+
+        const card = document.createElement('div'); 
+        card.className = `card type-${c.type} ${c.rest ? 'rest' : ''}`;
+
+        if(c.img) {
+            card.style.backgroundImage = `url(${c.img})`;
+            card.style.backgroundColor = '#0f172a';
+        } else { 
+            card.style.background = c.color; 
+            card.style.display = 'flex'; 
+            card.style.alignItems = 'center'; 
+            card.style.justifyContent = 'center'; 
+            card.style.fontSize = isMini ? '7px' : '9px'; 
+            card.innerText = c.name; 
+        }
+
+        // 下に重ねられたメンバー（左露出＆新しいものが一番上）
+        if(c.underMembers && c.underMembers.length > 0 && !isMini) {
+            c.underMembers.forEach((uCard, i) => {
+                const uUi = document.createElement('div');
+                uUi.className = `card attached-under-member type-member`;
+                uUi.style.left = (-12 - (i * 10)) + 'px';
+                uUi.style.zIndex = (4 + i);
+                if(uCard.img) uUi.style.backgroundImage = `url(${uCard.img})`;
+                else uUi.style.background = uCard.color;
+                cont.appendChild(uUi);
+            });
+        }
+
+        // 付与エネルギー（右露出＆新しいものが一番上）
+        if(c.attached && c.attached.length > 0 && !isMini) {
+            c.attached.forEach((eCard, i) => {
+                const eUi = document.createElement('div');
+                eUi.className = `card attached-energy type-energy`;
+                eUi.style.right = (-12 - (i * 10)) + 'px';
+                eUi.style.zIndex = (5 + i);
+                if(eCard.img) eUi.style.backgroundImage = `url(${eCard.img})`;
+                else eUi.style.background = eCard.color;
+                cont.appendChild(eUi);
+            });
+        }
+
+        if(zoneName === 'sandbox-live' && activeSandboxLiveId === c.instId) {
+            const popover = document.createElement('div');
+            popover.className = 'live-popover';
+            const btnTrash = document.createElement('button'); btnTrash.className = 'btn-mini'; btnTrash.innerText = '一覧に戻す';
+            btnTrash.onclick = (e) => { 
+                e.stopPropagation(); 
+                const idx = sandboxState.live.findIndex(x => x && x.instId === c.instId);
+                if(idx !== -1) {
+                    sandboxState.live[idx] = null;
+                    activeSandboxLiveId = null;
+                    renderSandbox();
+                }
+            };
+            popover.appendChild(btnTrash);
+            cont.appendChild(popover);
+        }
+
+        let timer;
+        card.onpointerdown = (e) => {
+            timer = setTimeout(() => {
+                draggingCard = { ...c, fromZone: zoneName };
+                dragElement = card.cloneNode(true); 
+                dragElement.classList.add('dragging-active');
+                document.body.appendChild(dragElement);
+                updateDrag(e.clientX, e.clientY);
+                activeSandboxLiveId = null;
+            }, 150);
+        };
+        card.onpointerup = () => clearTimeout(timer);
+
+        card.onclick = (e) => { 
+            if(!draggingCard) {
+                if(zoneName === 'sandbox-live') {
+                    activeSandboxLiveId = (activeSandboxLiveId === c.instId) ? null : c.instId;
+                    renderSandbox();
+                } else if (zoneName !== 'sandbox-list-live' && zoneName !== 'sandbox-list-member') {
+                    c.rest = !c.rest; 
+                    renderSandbox(); 
+                }
+            } 
+        };
+        cont.appendChild(card); 
+        return cont;
+    }
+
+    function handleSandboxDrop(targetZone, slotIdx, isStackingAction, targets) {
+        const from = draggingCard.fromZone;
+        let movingCard = null;
+        let originalSlotIdx = -1;
+
+        if (from === 'sandbox-list-live' || from === 'sandbox-list-member') {
+            movingCard = { 
+                ...draggingCard, 
+                instId: `sandbox_${draggingCard.id}_${Date.now()}`, 
+                rest: false, 
+                attached: [],
+                underMembers: []
+            };
+        } else if (from === 'sandbox-stage' || from === 'sandbox-live') {
+            const zoneKey = from.replace('sandbox-', '');
+            originalSlotIdx = sandboxState[zoneKey].findIndex(x => x && x.instId === draggingCard.instId);
+            if (originalSlotIdx !== -1) {
+                movingCard = sandboxState[zoneKey][originalSlotIdx];
+            }
+        } else if (from === 'sandbox-energyField') {
+            const idx = sandboxState.energyField.findIndex(x => x && x.instId === draggingCard.instId);
+            if (idx !== -1) {
+                movingCard = sandboxState.energyField.splice(idx, 1)[0];
+            }
+        }
+
+        if (!movingCard) {
+            renderSandbox();
+            return;
+        }
+
+        movingCard.rest = false;
+
+        if (targetZone === 'sandbox-list-live' || targetZone === 'sandbox-list-member' || !targetZone) {
+            if (movingCard.attached) movingCard.attached = [];
+            if (movingCard.underMembers) movingCard.underMembers = [];
+            if (originalSlotIdx !== -1 && (from === 'sandbox-stage' || from === 'sandbox-live')) {
+                sandboxState[from.replace('sandbox-', '')][originalSlotIdx] = null;
+            }
+            renderSandbox();
+            return;
+        }
+
+        if ((targetZone === 'sandbox-stage' || targetZone === 'sandbox-live') && slotIdx !== -1) {
+            const zoneKey = targetZone.replace('sandbox-', '');
+
+            if (zoneKey === 'live' && movingCard.type !== 'live') {
+                renderSandbox(); return;
+            }
+            if (zoneKey === 'stage' && movingCard.type === 'live') {
+                renderSandbox(); return;
+            }
+
+            const existing = sandboxState[zoneKey][slotIdx];
+            if (existing) {
+                if (zoneKey === 'stage' && (movingCard.type === 'energy' || (movingCard.type === 'member' && isStackingAction))) {
+                    if (movingCard.type === 'energy') {
+                        if (!existing.attached) existing.attached = [];
+                        existing.attached.push(movingCard);
+                    } else {
+                        if (!existing.underMembers) existing.underMembers = [];
+                        existing.underMembers.push(movingCard);
+                    }
+                    if (originalSlotIdx !== -1 && (from === 'sandbox-stage' || from === 'sandbox-live')) {
+                        sandboxState[from.replace('sandbox-', '')][originalSlotIdx] = null;
+                    }
+                } else {
+                    if (from === targetZone && originalSlotIdx !== -1) {
+                        sandboxState[zoneKey][originalSlotIdx] = existing;
+                        sandboxState[zoneKey][slotIdx] = movingCard;
+                    } else {
+                        if (existing.attached) existing.attached = [];
+                        if (existing.underMembers) existing.underMembers = [];
+                        sandboxState[zoneKey][slotIdx] = movingCard;
+
+                        if (originalSlotIdx !== -1 && (from === 'sandbox-stage' || from === 'sandbox-live')) {
+                            sandboxState[from.replace('sandbox-', '')][originalSlotIdx] = null;
+                        }
+                    }
+                }
+            } else {
+                sandboxState[zoneKey][slotIdx] = movingCard;
+                if (originalSlotIdx !== -1 && (from === 'sandbox-stage' || from === 'sandbox-live')) {
+                    sandboxState[from.replace('sandbox-', '')][originalSlotIdx] = null;
+                }
+            }
+        } else if (targetZone === 'sandbox-energyField') {
+            if (movingCard.type === 'energy') {
+                sandboxState.energyField.push(movingCard);
+                if (originalSlotIdx !== -1 && (from === 'sandbox-stage' || from === 'sandbox-live')) {
+                    sandboxState[from.replace('sandbox-', '')][originalSlotIdx] = null;
+                }
+            }
+        } else {
+            if (movingCard.attached) movingCard.attached = [];
+            if (movingCard.underMembers) movingCard.underMembers = [];
+            if (originalSlotIdx !== -1 && (from === 'sandbox-stage' || from === 'sandbox-live')) {
+                sandboxState[from.replace('sandbox-', '')][originalSlotIdx] = null;
+            }
+        }
+
+        renderSandbox();
+    }
+
+    function clearSandboxLive() {
+        sandboxState.live.forEach((card, idx) => {
+            if (card) {
+                sandboxState.live[idx] = null;
+            }
+        });
+        activeSandboxLiveId = null;
+        renderSandbox();
+    }
+
+    function untapAllSandboxEnergy() {
+        const hasTappedEnergy = sandboxState.energyField.some(c => c && c.rest);
+        if (hasTappedEnergy) {
+            sandboxState.energyField.forEach(c => {
+                if (c && c.rest) {
+                    c.rest = false;
+                }
+            });
+            renderSandbox();
+        }
+    }
+
+    window.onload = () => {
+        renderCardBase();
+        document.getElementById('btn-refresh').onclick = () => {
+            saveState();
+            simState.trash.forEach(c => { 
+                c.rest = false; 
+                clearCardSubAttachments(c);
+                if(c.type === 'energy') simState.energy.push(c); else simState.main.push(c); 
+            });
+            simState.trash = []; 
+            shuffleArray(simState.main); 
+            shuffleArray(simState.energy);
+            renderSim();
+        };
+    };
+</script>
+</body>
+</html>
